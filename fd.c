@@ -1,114 +1,20 @@
 #include "taskimpl.h"
 #include <fcntl.h>
 
+#include <sys/types.h>			/* See NOTES */
+#include <sys/socket.h>
+#include <stdio.h>
 
 static Tasklist sleeping;
 static int sleepingcounted;
+
+static Tasklist blocking;
+static int blockingcounted;
+
 static uvlong nsec(void);
+static int fdcheckblock(int);
 static int startedfdtask;
 
-#ifndef __linux__
-
-#include <sys/poll.h>
-enum
-{
-	MAXFD = 1024
-};
-
-static struct pollfd pollfd[MAXFD];
-static Task *polltask[MAXFD];
-static int npollfd;
-
-void
-fdtask(void *v)
-{
-	int i, ms;
-	Task *t;
-	uvlong now;
-	
-	tasksystem();
-	taskname("fdtask");
-	for(;;){
-		/* let everyone else run */
-		while(taskyield() > 0)
-			;
-		/* we're the only one runnable - poll for i/o */
-		errno = 0;
-		taskstate("poll");
-		if((t=sleeping.head) == nil)
-			ms = -1;
-		else{
-			/* sleep at most 5s */
-			now = nsec();
-			if(now >= t->alarmtime)
-				ms = 0;
-			else if(now+5*1000*1000*1000LL >= t->alarmtime)
-				ms = (t->alarmtime - now)/1000000;
-			else
-				ms = 5000;
-		}
-		if(poll(pollfd, npollfd, ms) < 0){
-			if(errno == EINTR)
-				continue;
-			fprint(2, "poll: %s\n", strerror(errno));
-			taskexitall(0);
-		}
-
-		/* wake up the guys who deserve it */
-		for(i=0; i<npollfd; i++){
-			while(i < npollfd && pollfd[i].revents){
-				taskready(polltask[i]);
-				--npollfd;
-				pollfd[i] = pollfd[npollfd];
-				polltask[i] = polltask[npollfd];
-			}
-		}
-		
-		now = nsec();
-		while((t=sleeping.head) && now >= t->alarmtime){
-			deltask(&sleeping, t);
-			if(!t->system && --sleepingcounted == 0)
-				taskcount--;
-			taskready(t);
-		}
-	}
-}
-
-void
-fdwait(int fd, int rw)
-{
-	int bits;
-
-	if(!startedfdtask){
-		startedfdtask = 1;
-		taskcreate(fdtask, 0, 32768);
-	}
-
-	if(npollfd >= MAXFD){
-		fprint(2, "too many poll file descriptors\n");
-		abort();
-	}
-	
-	taskstate("fdwait for %s", rw=='r' ? "read" : rw=='w' ? "write" : "error");
-	bits = 0;
-	switch(rw){
-	case 'r':
-		bits |= POLLIN;
-		break;
-	case 'w':
-		bits |= POLLOUT;
-		break;
-	}
-
-	polltask[npollfd] = taskrunning;
-	pollfd[npollfd].fd = fd;
-	pollfd[npollfd].events = bits;
-	pollfd[npollfd].revents = 0;
-	npollfd++;
-	taskswitch();
-}
-
-#else /* HAVE_EPOLL */
 
 // Scalable Linux-specific implementation
 #include <sys/epoll.h>
@@ -129,7 +35,7 @@ fdtask(void *v)
 		/* let everyone else run */
 		while(taskyield() > 0)
 			;
-		/* we're the only one runnable - poll for i/o */
+		/* we're the only one runnable - epoll for i/o */
 		errno = 0;
 		taskstate("epoll");
 		if((t=sleeping.head) == nil)
@@ -154,6 +60,14 @@ fdtask(void *v)
 
 		/* wake up the guys who deserve it */
 		for(i=0; i<nevents; i++){
+			//deleting it from blocking queue
+			t = blocking.head;
+			do{
+				if(t == events[i].data.ptr){
+					deltask(&blocking,t);
+					break;
+				}
+			}while(t!= blocking.tail);
             taskready((Task *)events[i].data.ptr);
 		}
 
@@ -161,6 +75,15 @@ fdtask(void *v)
 		while((t=sleeping.head) && now >= t->alarmtime){
 			deltask(&sleeping, t);
 			if(!t->system && --sleepingcounted == 0)
+				taskcount--;
+			taskready(t);
+		}
+
+		/*wake up the guys who are blocked */
+
+		while((t=blocking.head) && now >= t->alarmtime){
+			deltask(&blocking, t);
+			if(!t->system && --blockingcounted == 0)
 				taskcount--;
 			taskready(t);
 		}
@@ -204,7 +127,55 @@ fdwait(int fd, int rw)
         close(fd);
 }
 
-#endif /* HAVE_EPOLL */
+
+int fdcheckblock(int fd)
+{
+	uvlong now,when;
+	Task* t;
+	now = nsec();
+
+
+	struct timeval stTime;
+	socklen_t len = sizeof(stTime);
+	if(getsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&stTime,&len) == 0){
+		when = now + stTime.tv_sec * 1000 * 1000000 + stTime.tv_usec;
+		if (when == now){
+			return 0;
+		}
+	}else{
+		fprintf(stderr,"getsockopt failed:%s\n",strerror(errno));
+		return 0;
+	}
+	
+	for(t=blocking.head; t!=nil && t->alarmtime < when; t=t->next)
+		;
+
+	if(t){
+		taskrunning->prev = t->prev;
+		taskrunning->next = t;
+	}else{
+		taskrunning->prev = blocking.tail;
+		taskrunning->next = nil;
+	}
+	
+	t = taskrunning;
+	t->alarmtime = when;
+	if(t->prev)
+		t->prev->next = t;
+	else
+		blocking.head = t;
+	if(t->next)
+		t->next->prev = t;
+	else
+		blocking.tail = t;
+
+	if(!t->system && blockingcounted++ == 0)
+		taskcount++;
+
+	return 1;
+}
+
+
 
 uint
 taskdelay(uint ms)
@@ -214,10 +185,6 @@ taskdelay(uint ms)
 	
 	if(!startedfdtask){
 		startedfdtask = 1;
-#ifdef __linux__
-        epfd = epoll_create(1);
-        assert(epfd >= 0);
-#endif
 		taskcreate(fdtask, 0, 32768);
 	}
 
@@ -258,7 +225,6 @@ int
 fdread1(int fd, void *buf, int n)
 {
 	int m;
-	
 	do
 		fdwait(fd, 'r');
 	while((m = read(fd, buf, n)) < 0 && errno == EAGAIN);
@@ -269,9 +235,19 @@ int
 fdread(int fd, void *buf, int n)
 {
 	int m;
-	
-	while((m=read(fd, buf, n)) < 0 && errno == EAGAIN)
-		fdwait(fd, 'r');
+
+	int b = fdcheckblock(fd);
+	if(b){
+		while(1){
+			fdwait(fd,'r');
+			m = read(fd,buf,n);
+			break;
+		}
+	}else{
+		while((m=read(fd, buf, n)) < 0 && errno == EAGAIN){
+			fdwait(fd, 'r');
+		}
+	}
 	return m;
 }
 

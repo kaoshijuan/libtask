@@ -32,7 +32,7 @@ taskmain(int argc, char **argv)
 		taskcreate(fetchtask, 0, STACK);
 		while(taskyield() > 1)
 			;
-		sleep(1);
+		taskdelay(500);
 	}
 }
 
