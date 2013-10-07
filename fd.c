@@ -30,7 +30,7 @@ fdtask(void *v)
 
 	tasksystem();
 	taskname("fdtask");
-    struct epoll_event events[1000];
+    struct epoll_event events[20000];
 	for(;;){
 		/* let everyone else run */
 		while(taskyield() > 0)
@@ -41,17 +41,17 @@ fdtask(void *v)
 		if((t=sleeping.head) == nil)
 			ms = -1;
 		else{
-			/* sleep at most 5s */
+			/* sleep at most 100ms */
 			now = nsec();
 			if(now >= t->alarmtime)
 				ms = 0;
-			else if(now+5*1000*1000*1000LL >= t->alarmtime)
+			else if(now+500*1000*1000LL >= t->alarmtime)
 				ms = (t->alarmtime - now)/1000000;
 			else
-				ms = 5000;
+				ms = 500;
 		}
         int nevents;
-		if((nevents = epoll_wait(epfd, events, 1000, ms)) < 0){
+		if((nevents = epoll_wait(epfd, events, 20000, ms)) < 0){
 			if(errno == EINTR)
 				continue;
 			fprint(2, "epoll: %s\n", strerror(errno));
@@ -61,13 +61,10 @@ fdtask(void *v)
 		/* wake up the guys who deserve it */
 		for(i=0; i<nevents; i++){
 			//deleting it from blocking queue
-			t = blocking.head;
-			do{
-				if(t == events[i].data.ptr){
-					deltask(&blocking,t);
-					break;
-				}
-			}while(t!= blocking.tail);
+			for (t = blocking.head; t!= nil && t!= events[i].data.ptr; t=t->next)
+				;
+			if(t==events[i].data.ptr)
+				deltask(&blocking,t);
             taskready((Task *)events[i].data.ptr);
 		}
 
@@ -98,7 +95,7 @@ fdwait(int fd, int rw)
 		startedfdtask = 1;
         epfd = epoll_create(1);
         assert(epfd >= 0);
-		taskcreate(fdtask, 0, 32768);
+		taskcreate(fdtask, 0, 32768 * 10);
 	}
 
 	taskstate("fdwait for %s", rw=='r' ? "read" : rw=='w' ? "write" : "error");
@@ -185,7 +182,9 @@ taskdelay(uint ms)
 	
 	if(!startedfdtask){
 		startedfdtask = 1;
-		taskcreate(fdtask, 0, 32768);
+        epfd = epoll_create(1);
+        assert(epfd >= 0);		
+		taskcreate(fdtask, 0, 32768 * 10);
 	}
 
 	now = nsec();

@@ -13,7 +13,7 @@ OFILES=\
 	rendez.o\
 	task.o\
 
-all: $(LIB) primes tcpproxy testdelay
+all: $(LIB) primes tcpproxy testdelay testnettimeout
 
 $(OFILES): taskimpl.h task.h 386-ucontext.h power-ucontext.h
 
@@ -39,6 +39,9 @@ tcpproxy: tcpproxy.o $(LIB)
 httpload: httpload.o $(LIB)
 	$(CC) -o httpload httpload.o $(LIB)
 
+testnettimeout: testnettimeout.o $(LIB)
+	$(CC) -o testnettimeout testnettimeout.o $(LIB)
+
 testdelay: testdelay.o $(LIB)
 	$(CC) -o testdelay testdelay.o $(LIB)
 
@@ -46,7 +49,7 @@ testdelay1: testdelay1.o $(LIB)
 	$(CC) -o testdelay1 testdelay1.o $(LIB)
 
 clean:
-	rm -f *.o primes tcpproxy testdelay testdelay1 httpload $(LIB)
+	rm -f *.o primes tcpproxy testdelay testdelay1 httpload testtimeout $(LIB)
 
 install: $(LIB)
 	cp $(LIB) /usr/local/lib
