@@ -38,17 +38,22 @@ fdtask(void *v)
 		/* we're the only one runnable - epoll for i/o */
 		errno = 0;
 		taskstate("epoll");
-		if((t=sleeping.head) == nil)
+		if(sleeping.head == nil && blocking.head == nil)
 			ms = -1;
 		else{
 			/* sleep at most 100ms */
 			now = nsec();
-			if(now >= t->alarmtime)
-				ms = 0;
-			else if(now+500*1000*1000LL >= t->alarmtime)
-				ms = (t->alarmtime - now)/1000000;
-			else
+			if (t) {
+				if(now >= t->alarmtime)
+					ms = 0;
+				else if(now+500*1000*1000LL >= t->alarmtime)
+					ms = (t->alarmtime - now)/1000000;
+				else
+					ms = 500;			
+			}else{
 				ms = 500;
+			}
+	
 		}
         int nevents;
 		if((nevents = epoll_wait(epfd, events, 20000, ms)) < 0){
